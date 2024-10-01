@@ -41,14 +41,20 @@ current_state = None
 
 def check_tokens():
     """
-    Проверяет наличие всех необходимых токенов в переменных окружения.
+    Проверяет наличие необходимых токенов в глобальных переменных окружения.
 
-    Если какой-либо токен отсутствует, вызывает исключение
-    TokenAbsenceException.
+    Оценивает наличие токенов для доступа к API Практикума и Telegram.
+    Если какой-либо из токенов отсутствует, добавляет его в список
+    отсутствующих токенов.
+
+    Если список отсутствующих токенов не пуст, вызывает исключение
+    TokenAbsenceException с этим списком.
+
+    Returns:
+        None
 
     Raises:
-        TokenAbsenceException: Если отсутствуют PRACTICUM_TOKEN, TELEGRAM_TOKEN
-        или TELEGRAM_CHAT_ID.
+        TokenAbsenceException: Если отсутствует хотя бы один из токенов.
     """
     missing_tokens = []
     if not PRACTICUM_TOKEN:
@@ -67,36 +73,33 @@ def send_message(bot, message):
     Отправляет сообщение в Telegram.
 
     Parameters:
-        bot (telebot.TeleBot): Экземпляр бота Telegram.
-        message (str): Текст сообщения для отправки.
+        bot (telebot.TeleBot): Экземпляр бота Telegram для отправки сообщений.
+        message (str): Сообщение для отправки в Telegram.
 
-    Logs:
-        Debug: Сообщение успешно отправлено.
-        Error: Ошибка при отправке сообщения.
+    Returns:
+        None
     """
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logger.debug(f'Отправлено сообщение: {message}')
+        logger.debug(f'Отправлено сообщение {message}')
     except Exception as e:
-        logger.error(f'Не удалось доставить сообщение. Ошибка: {e}')
+        logger.error(f'Не удалось доставить сообщение. Ошибка {e}')
 
 
 def get_api_answer(timestamp):
     """
-    Делает запрос к API Практикума и возвращает ответ в виде словаря.
+    Получает ответ от API Практикума начиная с указанного времени.
 
     Parameters:
-        timestamp (int): Время в формате Unix, начиная с которого
-        запрашиваются данные.
+        timestamp (int): Unix-время, с которого запрашиваются события домашних
+        работ.
 
     Returns:
-        dict: Ответ от API с информацией о домашних работах.
+        dict: Ответ от API, содержащий информацию о домашних работах и времени
+        запроса.
 
     Raises:
-        ValueError: Если статус ответа не равен 200 или не удалось
-        декодировать JSON.
-    Logs:
-        Error: Ошибки при запросе или при декодировании JSON.
+        ValueError: Если статус ответа не равен 200 или ответ не является JSON.
     """
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params={'from_date':
@@ -125,14 +128,14 @@ def check_response(response):
     Проверяет корректность ответа от API.
 
     Parameters:
-        response (dict): Ответ от API.
+        response (dict): Ответ от API, содержащий информацию о домашних
+        работах.
 
     Raises:
-        TypeError: Если ответ не является словарем или 'homeworks' не является
-        списком.
-        ValueError: Если отсутствуют ключи 'homeworks' или 'current_date'.
-    Logs:
-        Debug: Если в ответе нет новых домашних работ.
+        TypeError: Если ответ не является словарем или ключ 'homeworks' не
+        является списком.
+        ValueError: Если в ответе отсутствуют ключи 'homeworks' или
+        'current_date'.
     """
     if not isinstance(response, dict):
         raise TypeError('Ответ API должен быть словарем.')
@@ -152,7 +155,7 @@ def check_response(response):
 
 def parse_status(homework):
     """
-    Извлекает статус домашнего задания и возвращает сообщение о его изменении.
+    Извлекает статус домашнего задания и формирует сообщение о его изменении.
 
     Parameters:
         homework (dict): Словарь с информацией о домашнем задании.
@@ -161,33 +164,27 @@ def parse_status(homework):
         str: Сообщение о статусе домашней работы.
 
     Raises:
-        KeyError: Если в словаре нет ключей 'homework_name' или 'status'.
+        KeyError: Если в словаре отсутствуют ключи 'homework_name' или
+        'status'.
         ValueError: Если статус работы неизвестен.
     """
     if 'homework_name' not in homework:
         raise KeyError('Ключ "homework_name" отсутствует в ответе API.')
     if 'status' not in homework:
         raise KeyError('Ключ "status" отсутствует в ответе API.')
-
     homework_name = homework.get('homework_name')
     status = homework.get('status')
     verdict = HOMEWORK_VERDICTS.get(status)
-
     if verdict is None:
         raise ValueError(f'Неизвестный статус работы: {status}')
-
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
+current_status = None
+
+
 def main():
-    """
-    Основная логика работы бота.
-
-    Проверяет токены, получает статус домашней работы и отправляет сообщение
-    при изменении статуса.
-
-    Работает в бесконечном цикле с периодическим запросом к API.
-    """
+    """Основная логика работы бота."""
     check_tokens()
 
     bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
@@ -199,14 +196,12 @@ def main():
             response = get_api_answer(timestamp)
             check_response(response)
             homeworks = response.get('homeworks')
-            if homeworks:
-                message = parse_status(homeworks[0])
-                if current_status != message:
-                    send_message(bot, message)
-                    current_status = message
+            message = parse_status(homeworks[0])
+            if current_status != message:
+                send_message(bot, message)
+                current_status = message
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger.error(message)
         time.sleep(RETRY_PERIOD)
 
 
