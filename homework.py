@@ -198,7 +198,6 @@ def parse_status(homework):
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-
 def main():
     """Основной цикл выполнения программы."""
     check_tokens()
