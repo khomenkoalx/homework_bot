@@ -50,7 +50,7 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-RETRY_PERIOD = 5
+RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -171,7 +171,7 @@ def check_response(response):
         logger.debug(NO_NEW_HOMEWORK_MSG)
 
 
-def parse_status(homeworks):
+def parse_status(homework):
     """
     Парсит статус домашней работы.
 
@@ -186,20 +186,17 @@ def parse_status(homeworks):
         KeyError: Если отсутствует ключ 'homework_name' или 'status'.
         ValueError: Если у домашней работы неожиданный статус.
     """
-    if homeworks:
-        homework = homeworks[0]
-        if 'homework_name' not in homework:
-            raise KeyError(HOMEWORK_NAME_MISSING_MSG)
-        if 'status' not in homework:
-            raise KeyError(HOMEWORK_STATUS_MISSING_MSG)
-        status = homework.get('status')
-        homework_name = homework.get('homework_name')
-        verdict = HOMEWORK_VERDICTS.get(status)
-        if status not in HOMEWORK_VERDICTS.keys():
-            raise ValueError(UNKNOWN_STATUS_MSG.format(status=status))
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    else:
-        return NO_NEW_HOMEWORK_MSG
+    if 'homework_name' not in homework:
+        raise KeyError(HOMEWORK_NAME_MISSING_MSG)
+    if 'status' not in homework:
+        raise KeyError(HOMEWORK_STATUS_MISSING_MSG)
+    status = homework.get('status')
+    homework_name = homework.get('homework_name')
+    verdict = HOMEWORK_VERDICTS.get(status)
+    if status not in HOMEWORK_VERDICTS.keys():
+        raise ValueError(UNKNOWN_STATUS_MSG.format(status=status))
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+
 
 
 def main():
@@ -215,18 +212,22 @@ def main():
             response = get_api_answer(timestamp)
             if response.get('current_date'):
                 timestamp = int(response.get('current_date')) + 1
-            check_response(response)
-            homeworks = response.get('homeworks')
-            message = parse_status(homeworks)
-            if last_message != message:
-                sent_successfully = send_message(bot, message)
-                if sent_successfully:
-                    last_message = message
-                    sent_successfully = False
+                check_response(response)
+                homeworks = response.get('homeworks')
+                if homeworks:
+                    message = parse_status(homeworks[0])
+                    if last_message != message:
+                        sent_successfully = send_message(bot, message)
+                        if sent_successfully:
+                            last_message = message
+                            sent_successfully = False
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.exception(f'Ошибка в работе программы: {error}')
-            send_message(bot, message)
+            sent_successfully = send_message(bot, message)
+            if sent_successfully:
+                last_message = message
+                sent_successfully = False
         time.sleep(RETRY_PERIOD)
 
 
