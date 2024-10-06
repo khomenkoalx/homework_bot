@@ -8,6 +8,9 @@ import requests
 import telebot
 from dotenv import load_dotenv
 
+from exceptions import InvalidJSONError, ConnectionError
+
+os.environ.pop('PRACTICUM_TOKEN')
 
 load_dotenv()
 
@@ -20,10 +23,11 @@ DELIVERY_ERROR_MESSAGE = (
 INVALID_JSON_MESSAGE = (
     'Ошибка API. Статус-код: {status_code}. '
     'Параметры запроса: {endpoint}, {headers}, {params}. '
-    'Найденные имена ключе: {found_keys}'
+    'Найденные имена ключей: {found_keys} '
     'Отказ в обслуживании: {error}.'
 )
-REQUEST_ERROR_MESSAGE = 'Ошибка при запросе к API: {error}'
+REQUEST_ERROR_MESSAGE = ('Ошибка при запросе к API. Адрес: {endpoint}, '
+                         'заголовки: {headers}, параметры: {params}')
 HOMEWORK_KEY_MISSING_MESSAGE = 'Ключ "homeworks" отсутствует.'
 UNKNOWN_STATUS_MESSAGE = 'Неизвестный статус работы: {status}'
 HOMEWORK_NAME_MISSING_MESSAGE = ('Ключ "homework_name" отсутствует '
@@ -41,7 +45,7 @@ HOMEWORKS_NOT_LIST_MESSAGE = ('Ключу homeworks соответствует {
 API_ANSWER_NOT_DICTIONARY = ('Ответ от API является {actual_type}, '
                              'а не словарем')
 MESSAGE_SENT_MESSAGE = 'Отправлено сообщение {message}'
-
+WRONG_JSON_KEYS = ('code', 'error')
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -74,7 +78,8 @@ def check_tokens():
         name for name in TOKEN_NAMES if not globals().get(name)
     ]
     if missing_tokens:
-        raise EnvironmentError(
+        logger.critical(TOKEN_ABSENCE_MESSAGE.format(token=missing_tokens))
+        raise ValueError(
             TOKEN_ABSENCE_MESSAGE.format(token=missing_tokens)
         )
 
@@ -114,8 +119,8 @@ def get_api_answer(timestamp):
         dict: Ответ от API, представленный в виде словаря.
 
     Raises:
-        ValueError: Если возникает ошибка при выполнении запроса к API
-        или если статус ответа не равен HTTPStatus.OK.
+        ConnectionError: Если возникает ошибка при выполнении запроса к API.
+        InvalidJSONError: Если статус ответа не равен 200.
     """
     try:
         response = requests.get(
@@ -123,22 +128,25 @@ def get_api_answer(timestamp):
             headers=HEADERS,
             params={'from_date': timestamp}
         )
-    except requests.RequestException as error:
-        logger.error(
-            REQUEST_ERROR_MESSAGE.format(error=error)
+    except requests.RequestException:
+        raise ConnectionError(
+            REQUEST_ERROR_MESSAGE.format(
+                endpoint=ENDPOINT,
+                headers=HEADERS,
+                params={'from_date': timestamp}
+            )
         )
-        send_message(REQUEST_ERROR_MESSAGE.format(error=error))
-
     if response.status_code != HTTPStatus.OK:
         error_message = response.json().get('error')
         error_code = response.json().get('code')
 
-        raise requests.exceptions.InvalidJSONError(INVALID_JSON_MESSAGE.format(
+        raise InvalidJSONError(INVALID_JSON_MESSAGE.format(
             status_code=response.status_code,
             endpoint=ENDPOINT,
             headers=HEADERS,
             params={'from_date': timestamp},
-            found_keys=list(response.json().keys()),
+            found_keys=[key for key in response.json().keys()
+                        if key in WRONG_JSON_KEYS],
             error=error_message or error_code
         )
         )
@@ -153,10 +161,10 @@ def check_response(response):
         response (dict): Ответ от API в виде словаря.
 
     Raises:
-        TypeError: Если ответ не является словарем или если ключу
-        'homeworks' не соответствует список.
-        ValueError: Если в ответе отсутствует ключ 'homeworks' или
-        список 'homeworks' пуст.
+        TypeError: Если ответ не является словарем, если ключу
+        'homeworks' не соответствует список, если в ответе отсутствует
+        ключ 'homeworks'.
+        KeyError: Если в ответе отсутствует ключ 'homeworks'.
     """
     if not isinstance(response, dict):
         raise TypeError(
@@ -166,10 +174,10 @@ def check_response(response):
         )
     if 'homeworks' not in response:
         raise KeyError(HOMEWORK_KEY_MISSING_MESSAGE)
-
-    if not isinstance(response.get('homeworks'), list):
+    homeworks = response['homeworks']
+    if not isinstance(homeworks, list):
         raise TypeError(HOMEWORKS_NOT_LIST_MESSAGE.format(
-            actual_type=type(response.get('homeworks'))
+            actual_type=type(homeworks)
         )
         )
 
@@ -203,11 +211,7 @@ def parse_status(homework):
 
 def main():
     """Основной цикл выполнения программы."""
-    try:
-        check_tokens()
-    except EnvironmentError as e:
-        logger.critical(e)
-        sys.exit(1)
+    check_tokens()
     bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     last_message = NO_NEW_HOMEWORK_MESSAGE
@@ -215,21 +219,21 @@ def main():
         try:
             response = get_api_answer(timestamp)
             check_response(response)
-            if not response.get('homeworks'):
+            homeworks = response.get('homeworks')
+            if not homeworks:
                 logger.debug(NO_NEW_HOMEWORK_MESSAGE)
             else:
-                message = parse_status(response.get('homeworks')[0])
+                message = parse_status(homeworks[0])
                 if last_message != message:
                     if send_message(bot, message):
                         last_message = message
-                        timestamp = response.get(
-                            'current_date', int(time.time())
-                        )
+                        timestamp = timestamp or response.get('current_date')
         except Exception as error:
             message = PROGRAM_FAIL_MESSAGE.format(error=error)
             logger.error(message)
-            if send_message(bot, message):
-                last_message = message
+            if last_message != message:
+                if send_message(bot, message):
+                    last_message = message
         time.sleep(RETRY_PERIOD)
 
 
