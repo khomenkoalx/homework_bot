@@ -8,7 +8,7 @@ import requests
 import telebot
 from dotenv import load_dotenv
 
-from exceptions import InvalidJSONError, ConnectionError
+from exceptions import InvalidJSONError
 
 load_dotenv()
 
@@ -21,11 +21,11 @@ DELIVERY_ERROR_MESSAGE = (
 INVALID_JSON_MESSAGE = (
     'Ошибка API. Статус-код: {status_code}. '
     'Параметры запроса: {endpoint}, {headers}, {params}. '
-    'Найденные имена ключей: {found_keys} '
-    'Отказ в обслуживании: {error}.'
+    'Коды ошибок: {error}.'
 )
 REQUEST_ERROR_MESSAGE = ('Ошибка при запросе к API. Адрес: {endpoint}, '
-                         'заголовки: {headers}, параметры: {params}')
+                         'заголовки: {headers}, параметры: {params}, '
+                         'текст ошибки: {error}')
 HOMEWORK_KEY_MISSING_MESSAGE = 'Ключ "homeworks" отсутствует.'
 UNKNOWN_STATUS_MESSAGE = 'Неизвестный статус работы: {status}'
 HOMEWORK_NAME_MISSING_MESSAGE = ('Ключ "homework_name" отсутствует '
@@ -34,7 +34,6 @@ HOMEWORK_STATUS_MISSING_MESSAGE = 'Ключ "status" отсутствует в �
 NO_NEW_HOMEWORK_MESSAGE = 'В ответе API отсутствуют новые домашние работы.'
 CONNECTION_ERROR_MESSAGE = 'Ошибка подключения: {error}'
 TIMEOUT_ERROR_MESSAGE = 'Превышено время ожидания: {error}'
-REQUEST_ERROR_MESSAGE = 'Ошибка при запросе к API {error}'
 UNKNOWN_HOMEWORK_ERROR_MESSAGE = ('Ключ "homework_name" отсутствует '
                                   'в ответе API.')
 PROGRAM_FAIL_MESSAGE = 'Сбой в работе программы {error}'
@@ -120,35 +119,37 @@ def get_api_answer(timestamp):
         ConnectionError: Если возникает ошибка при выполнении запроса к API.
         InvalidJSONError: Если статус ответа не равен 200.
     """
+    params = {'from_date': timestamp}
     try:
         response = requests.get(
             ENDPOINT,
             headers=HEADERS,
-            params={'from_date': timestamp}
+            params=params
         )
-    except requests.RequestException:
-        raise ConnectionError(
+    except requests.RequestException as error:
+        raise OSError(
             REQUEST_ERROR_MESSAGE.format(
                 endpoint=ENDPOINT,
                 headers=HEADERS,
-                params={'from_date': timestamp}
+                params=params,
+                error=error
             )
         )
+    response_dict = response.json()
     if response.status_code != HTTPStatus.OK:
-        error_message = response.json().get('error')
-        error_code = response.json().get('code')
-
+        error_info = str()
+        for key, value in response_dict.items():
+            if key in WRONG_JSON_KEYS:
+                error_info += key + ': ' + str(value) + ' '
         raise InvalidJSONError(INVALID_JSON_MESSAGE.format(
             status_code=response.status_code,
             endpoint=ENDPOINT,
             headers=HEADERS,
-            params={'from_date': timestamp},
-            found_keys=[key for key in response.json().keys()
-                        if key in WRONG_JSON_KEYS],
-            error=error_message or error_code
+            params=params,
+            error=error_info
         )
         )
-    return response.json()
+    return response_dict
 
 
 def check_response(response):
@@ -217,21 +218,23 @@ def main():
         try:
             response = get_api_answer(timestamp)
             check_response(response)
-            homeworks = response.get('homeworks')
+            homeworks = response['homeworks']
             if not homeworks:
                 logger.debug(NO_NEW_HOMEWORK_MESSAGE)
             else:
                 message = parse_status(homeworks[0])
-                if last_message != message:
-                    if send_message(bot, message):
-                        last_message = message
-                        timestamp = timestamp or response.get('current_date')
+                if last_message == message:
+                    continue
+                elif send_message(bot, message):
+                    last_message = message
+                    timestamp = response.get('current_date', timestamp)
         except Exception as error:
             message = PROGRAM_FAIL_MESSAGE.format(error=error)
             logger.error(message)
-            if last_message != message:
-                if send_message(bot, message):
-                    last_message = message
+            if last_message == message:
+                continue
+            elif send_message(bot, message):
+                last_message = message
         time.sleep(RETRY_PERIOD)
 
 
