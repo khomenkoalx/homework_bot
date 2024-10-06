@@ -8,18 +8,22 @@ import requests
 import telebot
 from dotenv import load_dotenv
 
+
 load_dotenv()
 
+TOKEN_NAMES = ('PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID')
 
 TOKEN_ABSENCE_MESSAGE = 'Отсутствуют переменные окружения: {token}'
 DELIVERY_ERROR_MESSAGE = (
     'Не удалось доставить сообщение {message}. Ошибка: {error}.'
 )
-API_ERROR_MESSAGE = (
+INVALID_JSON_MESSAGE = (
     'Ошибка API. Статус-код: {status_code}. '
-    'Параметры запроса: {params}. '
-    'Отказ в обслуживании: {error}. Код: {code}.'
+    'Параметры запроса: {endpoint}, {headers}, {params}. '
+    'Найденные имена ключе: {found_keys}'
+    'Отказ в обслуживании: {error}.'
 )
+REQUEST_ERROR_MESSAGE = 'Ошибка при запросе к API: {error}'
 HOMEWORK_KEY_MISSING_MESSAGE = 'Ключ "homeworks" отсутствует.'
 UNKNOWN_STATUS_MESSAGE = 'Неизвестный статус работы: {status}'
 HOMEWORK_NAME_MISSING_MESSAGE = ('Ключ "homework_name" отсутствует '
@@ -32,10 +36,13 @@ REQUEST_ERROR_MESSAGE = 'Ошибка при запросе к API {error}'
 UNKNOWN_HOMEWORK_ERROR_MESSAGE = ('Ключ "homework_name" отсутствует '
                                   'в ответе API.')
 PROGRAM_FAIL_MESSAGE = 'Сбой в работе программы {error}'
-HOMEWORKS_NOT_LIST_MESSAGE = 'Ключу homeworks соответствует не список.'
+HOMEWORKS_NOT_LIST_MESSAGE = ('Ключу homeworks соответствует {actual_type}, '
+                              'а не список.')
 API_ANSWER_NOT_DICTIONARY = ('Ответ от API является {actual_type}, '
                              'а не словарем')
 MESSAGE_SENT_MESSAGE = 'Отправлено сообщение {message}'
+
+
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -50,15 +57,6 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format=('%(asctime)s - %(name)s - %(funcName)s - %(lineno)d'
-            '- %(levelname)s - %(message)s'),
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(f'{__file__}.log', encoding='utf-8')
-    ]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -72,20 +70,12 @@ def check_tokens():
     Raises:
         ValueError: Если отсутствует один или несколько токенов.
     """
-    variables = {
-        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
-        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
-        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
-    }
     missing_tokens = [
-        name for name, value in variables.items() if value is None
+        name for name in TOKEN_NAMES if not globals().get(name)
     ]
     if missing_tokens:
-        logger.critical(
-            TOKEN_ABSENCE_MESSAGE.format(token=', '.join(missing_tokens))
-        )
-        raise ValueError(
-            TOKEN_ABSENCE_MESSAGE.format(token=', '.join(missing_tokens))
+        raise EnvironmentError(
+            TOKEN_ABSENCE_MESSAGE.format(token=missing_tokens)
         )
 
 
@@ -134,20 +124,25 @@ def get_api_answer(timestamp):
             params={'from_date': timestamp}
         )
     except requests.RequestException as error:
-        raise ValueError(f'Ошибка при запросе к API {error}')
-    response_dict = response.json()  # ТОЧНО ЛИ СЮДА?
+        logger.error(
+            REQUEST_ERROR_MESSAGE.format(error=error)
+        )
+        send_message(REQUEST_ERROR_MESSAGE.format(error=error))
 
     if response.status_code != HTTPStatus.OK:
-        error_message = response_dict.get('error')
-        error_code = response_dict.get('code')
+        error_message = response.json().get('error')
+        error_code = response.json().get('code')
 
-        raise ValueError(API_ERROR_MESSAGE.format(
+        raise requests.exceptions.InvalidJSONError(INVALID_JSON_MESSAGE.format(
             status_code=response.status_code,
-            params={'from_date': timestamp, 'headers': HEADERS},
-            error=error_message,
-            code=error_code
-        ))
-    return response_dict
+            endpoint=ENDPOINT,
+            headers=HEADERS,
+            params={'from_date': timestamp},
+            found_keys=list(response.json().keys()),
+            error=error_message or error_code
+        )
+        )
+    return response.json()
 
 
 def check_response(response):
@@ -173,9 +168,10 @@ def check_response(response):
         raise KeyError(HOMEWORK_KEY_MISSING_MESSAGE)
 
     if not isinstance(response.get('homeworks'), list):
-        raise TypeError(HOMEWORKS_NOT_LIST_MESSAGE)
-    if not response.get('homeworks'):
-        logger.debug(NO_NEW_HOMEWORK_MESSAGE)
+        raise TypeError(HOMEWORKS_NOT_LIST_MESSAGE.format(
+            actual_type=type(response.get('homeworks'))
+        )
+        )
 
 
 def parse_status(homework):
@@ -207,30 +203,44 @@ def parse_status(homework):
 
 def main():
     """Основной цикл выполнения программы."""
-    check_tokens()
-
+    try:
+        check_tokens()
+    except EnvironmentError as e:
+        logger.critical(e)
+        sys.exit(1)
     bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     last_message = NO_NEW_HOMEWORK_MESSAGE
     while True:
         try:
             response = get_api_answer(timestamp)
-            if response.get('current_date'):
-                check_response(response)
-                homeworks = response.get('homeworks')
-                if homeworks:
-                    message = parse_status(homeworks[0])
-                    if last_message != message:
-                        if send_message(bot, message):
-                            last_message = message
-                            timestamp = int(response.get('current_date'))
+            check_response(response)
+            if not response.get('homeworks'):
+                logger.debug(NO_NEW_HOMEWORK_MESSAGE)
+            else:
+                message = parse_status(response.get('homeworks')[0])
+                if last_message != message:
+                    if send_message(bot, message):
+                        last_message = message
+                        timestamp = response.get(
+                            'current_date', int(time.time())
+                        )
         except Exception as error:
             message = PROGRAM_FAIL_MESSAGE.format(error=error)
             logger.error(message)
-            send_message(bot, message)
+            if send_message(bot, message):
+                last_message = message
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
-
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=('%(asctime)s - %(name)s - %(funcName)s - %(lineno)d'
+                '- %(levelname)s - %(message)s'),
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(f'{__file__}.log', encoding='utf-8')
+        ]
+    )
     main()
