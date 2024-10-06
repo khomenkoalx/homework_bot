@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 
 from exceptions import InvalidJSONError, ConnectionError
 
-os.environ.pop('PRACTICUM_TOKEN')
-
 load_dotenv()
 
 TOKEN_NAMES = ('PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID')
